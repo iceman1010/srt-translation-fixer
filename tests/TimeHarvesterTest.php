@@ -85,6 +85,46 @@ final class TimeHarvesterTest extends TestCase
         $this->assertSame(28, $result['residual'][0]['char_budget'], 'floor(4 * 7.0) = 28');
     }
 
+    public function testCeilingBoundsExtensionPlusPullCombined(): void
+    {
+        // Regression (caught by the verification gate on production data,
+        // 2026-10-27): 31 chars need 7.75s at 4 cps. The out-extension
+        // honors start+7s, but the follow-up in-pull used to move the
+        // start earlier WITHOUT re-checking the ceiling, producing cues
+        // of 7.75s and more. The ceiling must bound the combined result.
+        $blocks = [
+            ['start' => 0.0, 'end' => 2.0, 'lines' => ['ok']],
+            ['start' => 10.0, 'end' => 14.0, 'lines' => [str_repeat('a', 31)]],
+            ['start' => 60.0, 'end' => 61.0, 'lines' => ['ok']],
+        ];
+
+        $result = (new TimeHarvester())->harvest($blocks, 4.0);
+        $cue = $result['blocks'][1];
+
+        $this->assertSame(17.0, $cue['end'], 'End extends to start + 7s');
+        $this->assertSame(10.0, $cue['start'], 'The pull is floored at end - 7s: no room left');
+        $this->assertSame(7.0, $cue['end'] - $cue['start']);
+        $this->assertCount(1, $result['residual'], 'Still over the limit at 4.4 cps - reported');
+    }
+
+    public function testCeilingBoundsPullWhenNeighborCapsTheEnd(): void
+    {
+        // Same bug from the pull side: the neighbor caps the end below
+        // start+7s, then the pull tries to recover the full needed time.
+        // 31 chars need 7.75s at 4 cps.
+        $result = (new TimeHarvester())->harvest([
+            ['start' => 0.0, 'end' => 2.0, 'lines' => ['ok']],
+            ['start' => 10.0, 'end' => 14.0, 'lines' => [str_repeat('a', 31)]],
+            ['start' => 16.5, 'end' => 20.0, 'lines' => ['ok']],
+        ], 4.0);
+        $cue = $result['blocks'][1];
+
+        $this->assertSame(16.416, $cue['end'], 'End capped by the next cue minus the min gap');
+        $this->assertSame(9.416, $cue['start'], 'Pull floored at end - 7s (not at prev cue: 2.084)');
+        $this->assertSame(7.0, $cue['end'] - $cue['start'], 'Combined duration is exactly the ceiling');
+        $this->assertCount(1, $result['residual']);
+    }
+
     public function testInTimePullLimitedAndGapAware(): void
     {
         // No room after (next starts 0.05s later); 0.1s gap before:

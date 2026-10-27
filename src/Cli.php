@@ -19,6 +19,8 @@ final class Cli
     public const EXIT_USAGE = 2;
     /** Fixes applied, but cues remain over the limit - they need condensation upstream. */
     public const EXIT_RESIDUAL = 3;
+    /** The self-verification gate rejected the repair; nothing was applied or written. */
+    public const EXIT_REJECTED = 4;
 
     private const REPORT_WIDTH = 66;
 
@@ -63,9 +65,19 @@ final class Cli
             if ($options['max_cps'] !== null) {
                 $fixer->setCpsOverride((float) $options['max_cps']);
             }
-            $result = $fixer->fix($files[0], $lang);
+            $result = $fixer->fix($files[0], $lang, $options['source']);
         } catch (\InvalidArgumentException $e) {
             return self::fail($e->getMessage(), $json, self::EXIT_INPUT_ERROR);
+        }
+
+        if (!$result['applied']) {
+            // A rejected repair is never written; the rendered envelope
+            // (report or json) carries the verification reasons.
+            echo $json
+                ? self::renderJson($result, null)
+                : self::renderReport($result, null);
+
+            return self::EXIT_REJECTED;
         }
 
         if ($options['out'] !== null) {
@@ -84,7 +96,7 @@ final class Cli
     }
 
     /**
-     * @return array{files: list<string>, lang: string|null, max_cps: string|null, out: string|null, json: bool, help: bool, version: bool}|null
+     * @return array{files: list<string>, lang: string|null, max_cps: string|null, out: string|null, source: string|null, json: bool, help: bool, version: bool}|null
      */
     private static function parseOptions(array $args): ?array
     {
@@ -93,12 +105,13 @@ final class Cli
             'lang' => null,
             'max_cps' => null,
             'out' => null,
+            'source' => null,
             'json' => false,
             'help' => false,
             'version' => false,
         ];
 
-        $valueNames = ['--lang' => 'lang', '--out' => 'out', '--max-cps' => 'max_cps'];
+        $valueNames = ['--lang' => 'lang', '--out' => 'out', '--max-cps' => 'max_cps', '--source' => 'source'];
 
         for ($i = 0, $n = count($args); $i < $n; $i++) {
             $arg = $args[$i];
@@ -119,7 +132,7 @@ final class Cli
                     return null;
                 }
                 $options[$valueNames[$arg]] = $args[$i];
-            } elseif (preg_match('/^(--lang|--out|--max-cps)=(.*)$/', $arg, $m) === 1) {
+            } elseif (preg_match('/^(--lang|--out|--max-cps|--source)=(.*)$/', $arg, $m) === 1) {
                 $options[$valueNames[$m[1]]] = $m[2];
             } elseif ($arg !== '' && $arg[0] === '-') {
                 return null;
@@ -149,6 +162,44 @@ final class Cli
             $profile['lines']
         );
         $lines[] = sprintf('  captions:  %d', $result['captions']);
+        $lines[] = '';
+
+        if (!$result['applied']) {
+            $lines[] = 'verification: REJECTED - nothing was applied, nothing written:';
+            foreach ($result['verification']['reasons'] ?? ['unknown reason'] as $reason) {
+                $lines[] = '  - ' . $reason;
+            }
+            $lines[] = '';
+            $lines[] = sprintf('residual - over-limit cues of the unmodified input (%d):', count($result['residual']));
+            foreach ($result['residual'] as $cue) {
+                $lines[] = sprintf(
+                    '  #%-5d %s  %d chars / %ss = %s cps  (budget: %d chars)',
+                    $cue['caption'],
+                    self::ts($cue['start']),
+                    $cue['chars'],
+                    $cue['duration'],
+                    $cue['cps'],
+                    $cue['char_budget']
+                );
+            }
+            $lines[] = '';
+
+            return implode("\n", $lines);
+        }
+
+        $verification = $result['verification'];
+        if ($verification['validator_compared']) {
+            $lines[] = sprintf(
+                'verification: passed (validator: %d guarded defects unchanged, %d -> %d timestamp mismatches are sanctioned timing repair)',
+                array_sum($verification['guarded_defects'] ?? []),
+                $verification['timestamp_mismatch_before'],
+                $verification['timestamp_mismatch_after']
+            );
+        } elseif ($verification['validator_skipped_reason'] !== null) {
+            $lines[] = 'verification: passed (structural only - ' . $verification['validator_skipped_reason'] . ')';
+        } else {
+            $lines[] = 'verification: passed (structural; pass --source <original> for a full validator comparison)';
+        }
         $lines[] = '';
 
         $fixes = $result['fixes'];
@@ -182,13 +233,15 @@ final class Cli
         }
         foreach ($residual as $cue) {
             $lines[] = sprintf(
-                '  #%-5d %s  %d chars / %ss = %s cps  (budget: %d chars)',
+                '  #%-5d %s  %d chars / %ss = %s cps  (cut %d+ to %d)  %s',
                 $cue['caption'],
-                self::ts($result['blocks'][$cue['caption'] - 1]['start'] ?? 0.0),
+                self::ts($cue['start']),
                 $cue['chars'],
                 $cue['duration'],
                 $cue['cps'],
-                $cue['char_budget']
+                $cue['chars_over'],
+                $cue['char_budget'],
+                self::preview($cue['text'])
             );
         }
         $lines[] = '';
@@ -197,6 +250,7 @@ final class Cli
         $lines[] = sprintf('  over reading speed:  %d -> %d captions', $summary['over_limit_before'], $summary['over_limit_after']);
         $lines[] = sprintf('  max cps:             %s -> %s', $summary['max_cps_before'], $summary['max_cps_after']);
         $lines[] = sprintf('  avg cps:             %s -> %s', $summary['avg_cps_before'], $summary['avg_cps_after']);
+        $lines[] = sprintf('  chars to cut:        %d across %d cues', $summary['residual_chars_to_cut'], count($residual));
         $lines[] = '  output:              ' . ($out !== null ? $out : 'dry run - pass --out to write the fixed file');
         $lines[] = '';
 
@@ -222,6 +276,18 @@ final class Cli
         return sprintf('%d:%02d:%02d.%03d', $h, $m % 60, $s % 60, $ms % 1000);
     }
 
+    /** Short single-line text preview for the human report. */
+    private static function preview(string $text, int $maxChars = 24): string
+    {
+        $text = str_replace(["\r", "\n"], ' ', $text);
+        $length = mb_strlen($text);
+        if ($length <= $maxChars) {
+            return $text;
+        }
+
+        return rtrim(mb_substr($text, 0, $maxChars - 1)) . '…';
+    }
+
     private static function usage(): string
     {
         return <<<TXT
@@ -232,10 +298,14 @@ Repairs reading-speed (cps) problems in a translated subtitle file: cues
 that exceed the target language's profile limit are extended into the
 surrounding gaps (out-time first, then the in-time if still needed),
 never past the neighbouring cue. Text is never changed; cues that cannot
-be saved by re-timing are reported with their character budget.
+be saved by re-timing are reported with their character budget. Every
+repair is accepted only after a self-verification gate proves it harmless
+(structural checks always; a full validator comparison with --source).
 
 Options:
   -l, --lang <code>   Target language (BCP-47-ish), e.g. ja, de, zh-Hant
+      --source <file> The original subtitle file; enables the full validator
+                      comparison in the self-verification gate
       --max-cps <F>   Override the profile's reading-speed limit
       --out <file>    Write the fixed subtitle file (without it: dry run)
       --json          Print the machine-readable result envelope
@@ -248,6 +318,8 @@ Exit codes:
   2  usage error
   3  fixes applied, but some cues still exceed the limit - they need a
      shorter translation (reported with their character budget)
+  4  the self-verification gate rejected the repair - nothing was
+     applied or written (the report lists the reasons)
 
 TXT;
     }

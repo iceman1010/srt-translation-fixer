@@ -152,7 +152,8 @@ final class CliTest extends TestCase
 
         $this->assertSame(3, $exit, 'Residual over-limit cues -> exit 3');
         $this->assertStringContainsString('residual', $output);
-        $this->assertStringContainsString('(budget: 8 chars)', $output);
+        $this->assertStringContainsString('(cut 4+ to 8)', $output);
+        $this->assertStringContainsString('twelve chars', $output, 'The text preview identifies the cue');
     }
 
     public function testMaxCpsOverrideChangesOutcome(): void
@@ -182,8 +183,56 @@ final class CliTest extends TestCase
         $this->assertArrayHasKey('residual', $envelope);
         $this->assertArrayHasKey('summary', $envelope);
         $this->assertArrayHasKey('profile', $envelope);
+        $this->assertArrayHasKey('verification', $envelope);
+        $this->assertTrue($envelope['applied']);
         $this->assertArrayNotHasKey('blocks', $envelope, 'The bulky block list is stripped from JSON');
         $this->assertSame(8, $envelope['residual'][0]['char_budget']);
+        $this->assertSame('twelve chars', $envelope['residual'][0]['text'], 'JSON carries the condensation handoff');
+    }
+
+    public function testDryRunReportsStructuralVerification(): void
+    {
+        [$exit, $output] = $this->execute([$this->fixtures['fixable'], '-l', 'ja']);
+
+        $this->assertSame(0, $exit);
+        $this->assertStringContainsString('verification: passed (structural', $output);
+        $this->assertStringContainsString('--source', $output, 'The report points at the full gate');
+    }
+
+    public function testSourceRunsFullVerificationAndSanctionsDrift(): void
+    {
+        // Source with a 1s first cue: the repair extends the translation's
+        // first cue to 2s - past the 0.5s tolerance, sanctioned.
+        $source = $this->tmp . '/source.en.srt';
+        file_put_contents($source, $this->srt([
+            [0.0, 1.0, 'hello world'],
+            [10.0, 12.0, 'second line'],
+        ]));
+        $translation = $this->tmp . '/dense.en.srt';
+        file_put_contents($translation, $this->srt([
+            [0.0, 1.0, 'twelve chars'],
+            [10.0, 12.0, 'ok text'],
+        ]));
+
+        [$exit, $output] = $this->execute([$translation, '-l', 'en', '--max-cps=6', '--source=' . $source]);
+
+        $this->assertSame(0, $exit);
+        $this->assertStringContainsString('verification: passed (validator', $output);
+        $this->assertStringContainsString('0 -> 1 timestamp mismatches', $output);
+    }
+
+    public function testUnparseableSourceSkipsFullComparisonButWrites(): void
+    {
+        $out = $this->tmp . '/fixed.srt';
+        $empty = $this->tmp . '/empty.srt';
+        file_put_contents($empty, '');
+
+        [$exit, $output] = $this->execute([$this->fixtures['fixable'], '-l', 'ja', '--source=' . $empty, '--out=' . $out]);
+
+        $this->assertSame(0, $exit, 'Structural verification suffices');
+        $this->assertStringContainsString('verification: passed (structural only', $output);
+        $this->assertStringContainsString('could not parse the source', $output);
+        $this->assertFileExists($out, 'The repair is applied and written');
     }
 
     /**

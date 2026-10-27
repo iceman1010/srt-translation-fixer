@@ -55,7 +55,7 @@ final class TimeHarvester
      * @return array{
      *     blocks: list<array{start: float, end: float, lines: list<string>}>,
      *     fixes: list<array{type: string, caption: int, start_before: float, end_before: float, start_after: float, end_after: float, out_extension: float, in_pull: float, cps_before: float, cps_after: float}>,
-     *     residual: list<array{type: string, caption: int, chars: int, duration: float, cps: float, char_budget: int}>
+     *     residual: list<array{type: string, caption: int, start: float, end: float, text: string, chars: int, duration: float, cps: float, char_budget: int, chars_over: int}>
      * }
      */
     public function harvest(array $blocks, float $cps): array
@@ -99,24 +99,35 @@ final class TimeHarvester
 
                 // 2) in-time pull into the preceding gap, as far as
                 //    still needed, never past the previous cue (plus the
-                //    minimum gap) and never below 0.
+                //    minimum gap), never below 0, and never so far that
+                //    the total duration passes the ceiling - the ceiling
+                //    must bound the COMBINED result, not each half
+                //    (caught by the verification gate on real data).
                 if ($endMs - $startMs < $neededMs) {
                     $floorMs = 0;
                     if ($prevEndMs !== null) {
                         $floorMs = max($floorMs, $prevEndMs + self::MIN_GAP_MS);
                     }
+                    $floorMs = max($floorMs, $endMs - self::MAX_DURATION_MS);
                     $startMs = min($startMs, max($endMs - $neededMs, $floorMs));
                 }
 
                 $finalDurationMs = $endMs - $startMs;
                 if ($finalDurationMs < $neededMs) {
+                    $budget = (int) floor($cps * $finalDurationMs / 1000);
+                    // The full condensation handoff: everything an upstream
+                    // shortening pass needs to target this cue.
                     $residual[] = [
                         'type' => 'over_reading_speed',
                         'caption' => $index + 1,
+                        'start' => self::toSeconds($startMs),
+                        'end' => self::toSeconds($endMs),
+                        'text' => implode("\n", $lines),
                         'chars' => $chars,
                         'duration' => round($finalDurationMs / 1000, 3),
                         'cps' => round($chars * 1000 / $finalDurationMs, 1),
-                        'char_budget' => (int) floor($cps * $finalDurationMs / 1000),
+                        'char_budget' => $budget,
+                        'chars_over' => max(0, $chars - $budget),
                     ];
                 }
 
