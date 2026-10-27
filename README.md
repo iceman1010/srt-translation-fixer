@@ -46,6 +46,27 @@ durations only widening, no new overlaps, the 7 s ceiling. With
 An unparseable source *skips* the comparison loudly (structural checks
 still ran) rather than rejecting.
 
+## Pipeline order
+
+The verdict and the repair judge different artefacts:
+
+1. **Validate the raw translation** — the validator's verdict (including
+   the drift gate and billing decisions) runs on exactly what the
+   engine produced.
+2. **Fix** — this tool re-wraps and re-times for readability; every
+   change is proven safe by the verification gate first.
+3. **Deliver the fixed file.**
+
+Never re-validate a fixed file with default thresholds: reading-time
+extensions are *intentional* drift from the source timeline, and the
+validator's `timestamp_drift` gate (2 % of pairs) correctly rejects
+exactly that — measured on the 29 production dumps, 8 files flip
+valid→INVALID on drift alone while their readability improves
+(`docs/scripts/verdict-replay.php`). If a fixed file must be
+re-validated, raise the gate (`--max-drift-ratio=1`) and expect the
+resulting `timestamp_mismatch` defects: they are the repair. The CLI
+prints a `re-validate:` hint whenever it re-timed cues.
+
 
 Splitting cues into *shorter* ones is deliberately not on the ladder: it
 does not lower cps (same characters over the same seconds) and faster

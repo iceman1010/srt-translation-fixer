@@ -298,6 +298,19 @@ final class Cli
         $lines[] = sprintf('  max cps:             %s -> %s', $summary['max_cps_before'], $summary['max_cps_after']);
         $lines[] = sprintf('  avg cps:             %s -> %s', $summary['avg_cps_before'], $summary['avg_cps_after']);
         $lines[] = sprintf('  chars to cut:        %d across %d cues', $summary['residual_chars_to_cut'], $cutCues);
+        $retimed = false;
+        foreach ($result['fixes'] as $fix) {
+            if (($fix['type'] ?? '') !== 'rewrapped') {
+                $retimed = true; // any non-wrap fix is a timing repair
+                break;
+            }
+        }
+        if ($retimed) {
+            // Timing repair is intentional drift from the source
+            // timeline; re-validating the fixed file with default
+            // thresholds trips the validator's timestamp_drift gate.
+            $lines[] = '  re-validate:         with the source only via --max-drift-ratio (timings were deliberately repaired)';
+        }
         $lines[] = '  output:              ' . ($out !== null ? $out : 'dry run - pass --out to write the fixed file');
         $lines[] = '';
 

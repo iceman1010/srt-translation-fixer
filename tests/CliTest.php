@@ -35,6 +35,13 @@ final class CliTest extends TestCase
             [2.0, 4.0, 'ok'],
         ]));
 
+        // Compliant: nothing to re-wrap or re-time at the ja profile.
+        $this->fixtures['compliant'] = $this->tmp . '/compliant.ja.srt';
+        file_put_contents($this->fixtures['compliant'], $this->srt([
+            [0.0, 2.0, 'ok'],
+            [3.0, 5.0, 'fine'],
+        ]));
+
         $this->fixtures['broken'] = $this->tmp . '/broken.srt';
         file_put_contents($this->fixtures['broken'], "1\n00:00:01,000 --> 00:00:03,000\nHallo Welt\n\nBROKEN_LINE_WITHOUT_TIMESTAMP\nMehr Text\n\n");
 
@@ -131,6 +138,21 @@ final class CliTest extends TestCase
         $this->assertStringContainsString('over reading speed:  1 -> 0', $output);
         $this->assertFileDoesNotExist($out, 'Without --out nothing is ever written');
         $this->assertStringNotContainsString('(budget', $output, 'No residual cues to report');
+        $this->assertStringContainsString(
+            're-validate:',
+            $output,
+            'Re-timed cues are intentional drift: the summary must warn re-validators'
+        );
+    }
+
+    public function testCompliantFilePrintsNoRevalidateHint(): void
+    {
+        // Nothing re-timed -> nothing drifted -> no re-validation warning.
+        [$exit, $output] = $this->execute([$this->fixtures['compliant'], '-l', 'ja']);
+
+        $this->assertSame(0, $exit);
+        $this->assertStringContainsString('fixes (0):', $output);
+        $this->assertStringNotContainsString('re-validate:', $output);
     }
 
     public function testOutWritesRepairedFile(): void
