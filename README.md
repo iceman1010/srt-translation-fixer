@@ -14,16 +14,42 @@ generalized to every language pair (only the profile numbers differ):
 
 | Step | Component | What it does | Status |
 |---|---|---|---|
-| 1 | Re-slotter | put translated text back onto the source cue timeline (repairs engine merge/drift; each text chunk recovers its full time envelope) | planned |
+| 1 | Re-slotter | put translated text back onto the source cue timeline (repairs engine merge/drift) | **dropped** — measured dead on production data (see below) |
 | 2 | `TimeHarvester` | extend out-times (then in-times) exactly as far as needed to reach `chars <= cps * duration` — never past the neighbouring cue (2-frame min gap) and never beyond 7 s total; need-driven and anchored to neighbours/duration, so re-running is a no-op | **implemented** |
-| 3 | NeighborMerger | merge adjacent dense cues when the gap is small and the combined text fits `cpl x lines` (gains the gap seconds, averages the speed) | planned |
+| 3 | NeighborMerger | merge adjacent dense cues when the combined text fits `cpl x lines` (gains the gap seconds, averages the speed) | descoped — marginal (≤ 7 cues/file, see below) |
 | 4 | LineWrapper | re-break text to the target's cpl/lines with script-aware rules (word boundaries for Latin scripts, kinsoku for CJK, …) | planned |
-| 5 | Residual report | cues no mechanical step can save are reported with their exact character budget (`cps x duration = N chars`) for a condensation pass upstream | **implemented** (cps) |
+| 5 | Residual report | cues no mechanical step can save are reported with their exact character budget (`cps x duration = N chars`) and the text itself, ready for a condensation pass upstream | **implemented** |
+| 6 | Self-verification | re-run the validator on the output and reject any repair that makes its verdict worse (`--source`) | **implemented** |
 
 Splitting cues into *shorter* ones is deliberately not on the ladder: it
 does not lower cps (same characters over the same seconds) and faster
-cue turnover measurably harms reading. Shorter captions appear as a
-side effect of step 1, where they recover real reading time.
+cue turnover measurably harms reading.
+
+### Why steps 1 and 3 were dropped (2026-10-27 probe, 29 production dump pairs)
+
+Scripts and raw findings: `docs/scripts/` (gitignored, local).
+
+- **Zero timing drift.** Every target cue in all 29 dumps sits exactly on
+  its source cue's times (max start drift 0.000 s) — the translation
+  pipeline passes source timing through untouched. There is nothing to
+  re-slot.
+- **Real engine merges are rare and splitting them backfires.** An engine
+  merge keeps the first cue's timing (signature: an *uncovered* source
+  slot, not a target spanning two slots). Genuine merge evidence exists
+  only in #4 (it→ja) and #6 (ja→en); drops (translation simply missing)
+  are ~3× more common and are the validator's defect, not the fixer's.
+  Simulated splitting on #4 made the file *worse* (544 → 555 over-limit
+  cues): the split halves land in short slots that cannot hold them at
+  4 cps, producing two broken cues where there was one.
+- **NeighborMerger is marginal under the compliance rule.** Merging
+  dense-with-dense cannot lower cps; only rare dense+sparse pairs qualify
+  (display limit `cpl × lines` must also hold). Simulation: #1 384→379,
+  #2 651→647, #17 413→410. Not worth the added semantics.
+- **Density is a text-length problem.** The worst files (#1/#2 uk→ja) are
+  87–92 % back-to-back cues with ja text ~2× too long per slot — no
+  timing operation can cure that. The cure is condensation upstream, fed
+  by the residual report (step 5).
+
 
 ## Single source of truth
 
