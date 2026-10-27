@@ -1,0 +1,33 @@
+{
+    "name": "srt/translation-fixer",
+    "description": "Repairs subtitle translations: re-times cues to the target language's reading-speed profile; re-segmentation and re-wrapping planned - the mechanical counterpart to srt/translation-validator",
+    "keywords": ["subtitles", "srt", "webvtt", "translation", "fixer", "readability"],
+    "license": "proprietary",
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../srt-translation-validator",
+            "options": {
+                "symlink": true
+            }
+        }
+    ],
+    "require": {
+        "php": "^8.0",
+        "srt/translation-validator": "@dev"
+    },
+    "autoload": {
+        "psr-4": {
+            "SrtFixer\\": "src/"
+        }
+    },
+    "bin": [
+        "bin/srt-fixer"
+    ],
+    "require-dev": {
+        "phpunit/phpunit": "^9.5"
+    },
+    "scripts": {
+        "test": "phpunit tests/"
+    }
+}
