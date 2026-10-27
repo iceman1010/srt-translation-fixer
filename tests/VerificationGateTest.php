@@ -232,6 +232,72 @@ final class VerificationGateTest extends TestCase
         $this->assertSame([], $result['guarded_regressions']);
     }
 
+    public function testGrownReadingSpeedCountFromImprovedCuesIsSanctioned(): void
+    {
+        // 15 chars in a 0.15s cue: the validator never counts reading
+        // speed for cues under its 0.2s minimum, so the input shows 0
+        // defects. The repair extends the cue to 0.5s (30 cps - still
+        // over the limit, now counted): the count grows 0 -> 1 while
+        // the cue improved 100 -> 30 cps. Per-cue never-worsen
+        // semantics must pass this and report the bookkeeping (corpus
+        // soak 2026-10-27: ai1/44575, 44576, 44586, 44593 all
+        // "grew" this way while every newly counted cue improved 3-5x).
+        $source = $this->writeSrt('source.srt', [
+            [0.0, 1.0, 'hello world'],
+            [10.0, 12.0, 'second line'],
+        ]);
+        $translation = $this->writeSrt('translation.srt', [
+            [0.0, 0.15, 'fuenfzehn zeich'],
+            [10.0, 12.0, 'zweiter text'],
+        ]);
+
+        $input = \SrtValidator\SubtitleLoader::loadFile($translation)->getInternalFormat();
+        $repaired = [
+            ['start' => 0.0, 'end' => 0.5, 'lines' => ['fuenfzehn zeich']],
+            ['start' => 10.0, 'end' => 12.0, 'lines' => ['zweiter text']],
+        ];
+
+        $result = (new VerificationGate())->verify($input, $repaired, $source, $translation, 'de');
+
+        $this->assertTrue($result['passed'], implode('; ', $result['reasons']));
+        $this->assertSame(0, $result['reading_speed_before']);
+        $this->assertSame(1, $result['reading_speed_after']);
+        $this->assertSame(
+            1,
+            $result['sanctioned_deltas']['reading_speed_newly_counted']['after'] ?? null,
+            'The growth must be visible as sanctioned bookkeeping, never silent'
+        );
+    }
+
+    public function testReadingSpeedRegressionRejectedPerCue(): void
+    {
+        // Wrapping a no-space run inserts a join space when the lines
+        // are joined again: 8 CJK chars in a 2.0s cue sit exactly at
+        // the ja limit (4.0 cps, uncounted); the two-line re-wrap
+        // joins to 9 chars = 4.5 cps - over the limit AND worse than
+        // the input cue. The per-cue check must reject this, naming
+        // the cue.
+        $source = $this->writeSrt('source.srt', [
+            [0.0, 2.0, 'hello world'],
+            [10.0, 12.0, 'second line'],
+        ]);
+        $translation = $this->writeSrt('translation.srt', [
+            [0.0, 2.0, '日本語テストです'],
+            [10.0, 12.0, '二番目'],
+        ]);
+
+        $input = \SrtValidator\SubtitleLoader::loadFile($translation)->getInternalFormat();
+        $repaired = [
+            ['start' => 0.0, 'end' => 2.0, 'lines' => ['日本語テスト', 'です']],
+            ['start' => 10.0, 'end' => 12.0, 'lines' => ['二番目']],
+        ];
+
+        $result = (new VerificationGate())->verify($input, $repaired, $source, $translation, 'ja');
+
+        $this->assertFalse($result['passed']);
+        $this->assertStringContainsString('reading speed worsened', implode(' ', $result['reasons']));
+    }
+
     public function testUnparseableSourceSkipsTheFullComparison(): void
     {
         // A source the validator cannot parse makes the comparison

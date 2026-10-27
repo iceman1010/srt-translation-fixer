@@ -39,6 +39,19 @@ durations only widening, no new overlaps, the 7 s ceiling. With
   re-pairs cues (proven on dump #6: harvest-only grows
   `merged_captions` by 2). The CLI reports them as
   `merged_captions 96 -> 98 (sanctioned re-pairing)`.
+- **Reading speed is judged per cue, not by defect count.** The
+  validator only counts an over-limit caption when its aligned source
+  caption is not itself overloaded (inheritance exemption) and its
+  duration is at least 0.2 s — both are alignment/threshold
+  bookkeeping that the fixer's timing changes legitimately disturb.
+  When the count grows, the gate examines every newly counted caption:
+  if its cps rose above its own input cps (the wrap join-space case),
+  the repair is rejected naming the cue; if every newly counted cue
+  stayed equal or improved, the growth is sanctioned and reported as
+  `reading_speed_newly_counted` in `sanctioned_deltas`. Corpus soak
+  (2026-10-27): the four files this rule rescued (ai1/44575, 44576,
+  44586, 44593) had every newly counted cue improved 3–5× (e.g. cps
+  110.2 → 24.5) while the old count-based check rejected them.
 - **Guarded** (may not appear or grow): everything else — text, cue
   count, scripts, format. Any delta rejects the whole repair (exit 4,
   nothing applied or written).

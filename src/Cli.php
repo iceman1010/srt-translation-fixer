@@ -213,6 +213,14 @@ final class Cli
                 if (in_array($type, ['timestamp_mismatch', 'reading_speed'], true)) {
                     continue; // already covered by the numbers above / the summary
                 }
+                if ($type === 'reading_speed_newly_counted') {
+                    $line .= sprintf(
+                        ', reading_speed defects %d -> %d (every newly counted cue improved - validator bookkeeping, not damage)',
+                        $delta['before'],
+                        $delta['after']
+                    );
+                    continue;
+                }
                 $line .= sprintf(', %s %d -> %d (sanctioned re-pairing)', $type, $delta['before'], $delta['after']);
             }
             $lines[] = $line . ')';
