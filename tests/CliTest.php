@@ -111,12 +111,13 @@ final class CliTest extends TestCase
     public function testJunkLinesAreParsedLenientlyAndStillReTimed(): void
     {
         // Untimestamped junk lines merge into the previous cue's text;
-        // the fixer re-times what parsed (format errors are the
-        // validator's job, not the fixer's).
+        // the fixer re-wraps and re-times what parsed (format errors are
+        // the validator's job, not the fixer's).
         [$exit, $output] = $this->execute([$this->fixtures['broken'], '-l', 'de']);
 
         $this->assertSame(0, $exit);
-        $this->assertStringContainsString('fixes (1):', $output);
+        $this->assertStringContainsString('fixes (2):', $output, 'One rewrap + one retime on the same cue');
+        $this->assertStringContainsString('rewrap', $output);
     }
 
     public function testDryRunFixesAndWritesNothing(): void

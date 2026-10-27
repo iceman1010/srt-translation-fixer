@@ -70,6 +70,44 @@ final class VerificationGateTest extends TestCase
         $this->assertStringContainsString('text changed', $result['reasons'][0]);
     }
 
+    public function testRewrappedTextPassesTheGate(): void
+    {
+        // Re-wrapping is the LineWrapper's charter: a line break may
+        // replace a space and vice versa, characters must not change.
+        $gate = new VerificationGate();
+
+        $latin = $gate->verify(
+            [['start' => 0.0, 'end' => 2.0, 'lines' => ['hello world']]],
+            [['start' => 0.0, 'end' => 2.0, 'lines' => ['hello', 'world']]],
+            null,
+            null,
+            null
+        );
+        $this->assertTrue($latin['passed']);
+
+        $cjk = $gate->verify(
+            [['start' => 0.0, 'end' => 2.0, 'lines' => ['一二三四五']]],
+            [['start' => 0.0, 'end' => 2.0, 'lines' => ['一二', '三四五']]],
+            null,
+            null,
+            null
+        );
+        $this->assertTrue($cjk['passed']);
+    }
+
+    public function testMergedWordsAreRejectedByTheGate(): void
+    {
+        // A wrapper bug that merges two words changes the atom
+        // sequence even though every character survived.
+        $input = [['start' => 0.0, 'end' => 2.0, 'lines' => ['hello world']]];
+        $repaired = [['start' => 0.0, 'end' => 2.0, 'lines' => ['helloworld']]];
+
+        $result = (new VerificationGate())->verify($input, $repaired, null, null, null);
+
+        $this->assertFalse($result['passed']);
+        $this->assertStringContainsString('text changed', $result['reasons'][0]);
+    }
+
     public function testCueCountChangeIsRejected(): void
     {
         $input = [['start' => 0.0, 'end' => 2.0, 'lines' => ['ok']]];
@@ -143,6 +181,26 @@ final class VerificationGateTest extends TestCase
             ['start' => 2.0, 'end' => 4.0, 'lines' => ['ok']],
         ];
         $this->assertTrue($gate->verify($input, $kept, null, null, null)['passed']);
+    }
+
+    public function testAlignerClassificationsAreSanctioned(): void
+    {
+        // merged/split/extra/missing captions are derived from cue start
+        // times inside the validator's 0.5s pairing tolerance, so a
+        // sanctioned in-pull can legitimately reclassify a pairing
+        // (dump #6: harvest-only grows merged_captions by 2). The gate
+        // must sanction them - content defects stay guarded.
+        $sanctioned = VerificationGate::SANCTIONED_TYPES;
+
+        $this->assertContains('timestamp_mismatch', $sanctioned);
+        $this->assertContains('reading_speed', $sanctioned);
+        foreach (['merged_captions', 'split_captions', 'extra_caption', 'missing_caption'] as $type) {
+            $this->assertContains($type, $sanctioned);
+        }
+        // Content the fixer never touches must stay OUTSIDE the list.
+        foreach (['text_changed', 'empty_cue', 'format_error', 'source_corruption_inherited'] as $guarded) {
+            $this->assertNotContains($guarded, $sanctioned);
+        }
     }
 
     public function testValidatorComparisonPassesAndSanctionsTimingDrift(): void

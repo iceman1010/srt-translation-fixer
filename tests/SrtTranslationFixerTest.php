@@ -183,6 +183,88 @@ final class SrtTranslationFixerTest extends TestCase
         $this->assertStringContainsString('could not parse the source', (string) $result['verification']['validator_skipped_reason']);
     }
 
+    public function testLineLimitProblemIsRewrappedEndToEnd(): void
+    {
+        // 14 chars on one line at the ja profile (13 cpl / 2 lines); the
+        // duration already satisfies 4 cps, so only the wrapper runs.
+        $file = $this->writeSrt('longline.ja.srt', [
+            [0.0, 4.0, 'ここは『ザ・クラブ』ですか？'],
+            [10.0, 12.0, 'ok'],
+        ]);
+
+        $result = (new SrtTranslationFixer())->fix($file, 'ja');
+
+        $this->assertTrue($result['applied'], 'The gate sanctions pure re-wrapping');
+        $this->assertSame(0, $result['summary']['over_limit_before'], 'No reading-speed problem');
+        $this->assertSame(1, $result['summary']['line_over_before']);
+        $this->assertSame(0, $result['summary']['line_over_after']);
+
+        $rewraps = array_values(array_filter(
+            $result['fixes'],
+            fn (array $f): bool => $f['type'] === 'rewrapped'
+        ));
+        $this->assertCount(1, $rewraps);
+        $this->assertSame(1, $rewraps[0]['caption']);
+
+        $lines = $result['blocks'][0]['lines'];
+        $this->assertCount(2, $lines);
+        foreach ($lines as $line) {
+            $this->assertLessThanOrEqual(13, mb_strlen($line));
+        }
+        $this->assertSame('ここは『ザ・クラブ』ですか？', implode('', $lines), 'Characters preserved, only the break moved');
+    }
+
+    public function testResidualDedupesPerCaptionAcrossProblemTypes(): void
+    {
+        // One cue, two problems: 30 chars in a locked 2s slot (over cps:
+        // budget 8) that also exceeds the 13x2 display capacity
+        // (budget 26). Both residual entries ride along, but the
+        // summary counts the stricter cut once.
+        $file = $this->writeSrt('double.ja.srt', [
+            [0.0, 2.0, 'ok'],
+            [2.0, 4.0, '一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十'],
+            [4.0, 6.0, 'ok'],
+        ]);
+
+        $result = (new SrtTranslationFixer())->fix($file, 'ja');
+
+        $this->assertTrue($result['applied']);
+        $this->assertCount(2, $result['residual']);
+        $types = array_column($result['residual'], 'type');
+        $this->assertContains('over_reading_speed', $types);
+        $this->assertContains('over_line_capacity', $types);
+        $this->assertSame([2, 2], array_column($result['residual'], 'caption'), 'Both entries point at the same cue');
+
+        $this->assertSame(22, $result['summary']['residual_chars_to_cut'], 'max(30-8, 30-26) = 22, counted once');
+    }
+
+    public function testWrapIsRevertedWhenItWouldBreakReadingSpeed(): void
+    {
+        // 14 CJK chars on ONE line in a locked 3.5s slot: exactly 4 cps
+        // (compliant), but over the 13 cpl line limit. Wrapping splits
+        // it 7/7 - and the checker's join space makes that 15 chars =
+        // 4.3 cps in a slot with no gap to harvest. Reading speed
+        // outranks line shape, so the wrap must be reverted: the cue
+        // keeps its long line and stays readable-speed compliant.
+        $file = $this->writeSrt('locked.ja.srt', [
+            [0.0, 3.5, '一二三四五六七八九十百千万上'],
+            [3.5, 5.0, 'ok'],
+        ]);
+
+        $result = (new SrtTranslationFixer())->fix($file, 'ja');
+
+        $this->assertTrue($result['applied']);
+        $this->assertSame(
+            ['一二三四五六七八九十百千万上'],
+            $result['blocks'][0]['lines'],
+            'The original single line is restored'
+        );
+        $this->assertSame([], array_column($result['fixes'], 'type'), 'Neither wrap nor retime survives');
+        $this->assertSame([], $result['residual'], 'The reverted cue is compliant where it counts');
+        $this->assertSame(0, $result['summary']['over_limit_after']);
+        $this->assertSame(1, $result['summary']['line_over_after'], 'The line problem stays - it is advisory');
+    }
+
     public function testMissingFileRejected(): void
     {
         $this->expectException(\InvalidArgumentException::class);

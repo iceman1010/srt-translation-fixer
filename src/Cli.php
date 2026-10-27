@@ -172,6 +172,18 @@ final class Cli
             $lines[] = '';
             $lines[] = sprintf('residual - over-limit cues of the unmodified input (%d):', count($result['residual']));
             foreach ($result['residual'] as $cue) {
+                if (($cue['type'] ?? '') === 'over_line_capacity') {
+                    $lines[] = sprintf(
+                        '  #%-5d %s  %d chars > %d display budget  (cut %d+)  %s',
+                        $cue['caption'],
+                        self::ts($cue['start']),
+                        $cue['chars'],
+                        $cue['char_budget'],
+                        $cue['chars_over'],
+                        self::preview($cue['text'])
+                    );
+                    continue;
+                }
                 $lines[] = sprintf(
                     '  #%-5d %s  %d chars / %ss = %s cps  (budget: %d chars)',
                     $cue['caption'],
@@ -189,12 +201,21 @@ final class Cli
 
         $verification = $result['verification'];
         if ($verification['validator_compared']) {
-            $lines[] = sprintf(
-                'verification: passed (validator: %d guarded defects unchanged, %d -> %d timestamp mismatches are sanctioned timing repair)',
+            $line = sprintf(
+                'verification: passed (validator: %d guarded defects unchanged, %d -> %d timestamp mismatches are sanctioned timing repair',
                 array_sum($verification['guarded_defects'] ?? []),
                 $verification['timestamp_mismatch_before'],
                 $verification['timestamp_mismatch_after']
             );
+            // Aligner classifications derived from moved start times -
+            // reported so a consumer sees the re-pairing, never silent.
+            foreach ($verification['sanctioned_deltas'] ?? [] as $type => $delta) {
+                if (in_array($type, ['timestamp_mismatch', 'reading_speed'], true)) {
+                    continue; // already covered by the numbers above / the summary
+                }
+                $line .= sprintf(', %s %d -> %d (sanctioned re-pairing)', $type, $delta['before'], $delta['after']);
+            }
+            $lines[] = $line . ')';
         } elseif ($verification['validator_skipped_reason'] !== null) {
             $lines[] = 'verification: passed (structural only - ' . $verification['validator_skipped_reason'] . ')';
         } else {
@@ -205,9 +226,21 @@ final class Cli
         $fixes = $result['fixes'];
         $lines[] = sprintf('fixes (%d):', count($fixes));
         if ($fixes === []) {
-            $lines[] = '  none - no cue needed re-timing';
+            $lines[] = '  none - no cue needed re-timing or re-wrapping';
         }
         foreach ($fixes as $fix) {
+            if (($fix['type'] ?? '') === 'rewrapped') {
+                $lines[] = sprintf(
+                    '  #%-5d %s  rewrap  %d -> %d lines, %d -> %d max cpl',
+                    $fix['caption'],
+                    self::ts($result['blocks'][$fix['caption'] - 1]['start'] ?? 0.0),
+                    count($fix['lines_before']),
+                    count($fix['lines_after']),
+                    $fix['max_line_before'],
+                    $fix['max_line_after']
+                );
+                continue;
+            }
             $move = [];
             if ($fix['out_extension'] > 0.0) {
                 $move[] = sprintf('end +%ss', rtrim(rtrim(number_format($fix['out_extension'], 3), '0'), '.'));
@@ -227,11 +260,23 @@ final class Cli
         $lines[] = '';
 
         $residual = $result['residual'];
-        $lines[] = sprintf('residual - retiming cannot save these, shorten the translation (%d):', count($residual));
+        $lines[] = sprintf('residual - mechanical repair cannot save these, shorten the translation (%d):', count($residual));
         if ($residual === []) {
             $lines[] = '  none';
         }
         foreach ($residual as $cue) {
+            if (($cue['type'] ?? '') === 'over_line_capacity') {
+                $lines[] = sprintf(
+                    '  #%-5d %s  %d chars > %d display budget  (cut %d+)  %s',
+                    $cue['caption'],
+                    self::ts($cue['start']),
+                    $cue['chars'],
+                    $cue['char_budget'],
+                    $cue['chars_over'],
+                    self::preview($cue['text'])
+                );
+                continue;
+            }
             $lines[] = sprintf(
                 '  #%-5d %s  %d chars / %ss = %s cps  (cut %d+ to %d)  %s',
                 $cue['caption'],
@@ -246,11 +291,13 @@ final class Cli
         }
         $lines[] = '';
 
+        $cutCues = count(array_unique(array_column($residual, 'caption')));
         $lines[] = 'summary:';
         $lines[] = sprintf('  over reading speed:  %d -> %d captions', $summary['over_limit_before'], $summary['over_limit_after']);
+        $lines[] = sprintf('  over line limits:    %d -> %d captions', $summary['line_over_before'], $summary['line_over_after']);
         $lines[] = sprintf('  max cps:             %s -> %s', $summary['max_cps_before'], $summary['max_cps_after']);
         $lines[] = sprintf('  avg cps:             %s -> %s', $summary['avg_cps_before'], $summary['avg_cps_after']);
-        $lines[] = sprintf('  chars to cut:        %d across %d cues', $summary['residual_chars_to_cut'], count($residual));
+        $lines[] = sprintf('  chars to cut:        %d across %d cues', $summary['residual_chars_to_cut'], $cutCues);
         $lines[] = '  output:              ' . ($out !== null ? $out : 'dry run - pass --out to write the fixed file');
         $lines[] = '';
 
@@ -294,11 +341,13 @@ final class Cli
 Usage:
   srt-fixer <translation-file> --lang <code> [options]
 
-Repairs reading-speed (cps) problems in a translated subtitle file: cues
-that exceed the target language's profile limit are extended into the
+Repairs reading-speed (cps) and line-limit problems in a translated
+subtitle file: cues that exceed the target language's profile limits are
+re-wrapped to the cpl/lines limits with script-aware rules (word
+boundaries for Latin scripts, kinsoku for CJK) and extended into the
 surrounding gaps (out-time first, then the in-time if still needed),
 never past the neighbouring cue. Text is never changed; cues that cannot
-be saved by re-timing are reported with their character budget. Every
+be saved mechanically are reported with their character budget. Every
 repair is accepted only after a self-verification gate proves it harmless
 (structural checks always; a full validator comparison with --source).
 

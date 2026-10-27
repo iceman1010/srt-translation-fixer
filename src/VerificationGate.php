@@ -24,10 +24,14 @@ use SrtValidator\SubtitleLoader;
  *     the fixer's sanctioned domain - moving cues away from the source
  *     timeline to buy reading time is exactly what TimeHarvester does -
  *     so `timestamp_mismatch` deltas are reported but never fail the
- *     gate; `reading_speed` must not increase. Every other defect type
- *     must not appear or grow: those cover content the fixer never
- *     touches (text, cue count, scripts, format), so any delta means a
- *     component bug and the whole repair is rejected.
+ *     gate; `reading_speed` must not increase. The aligner's
+ *     classifications (merged/split/extra/missing captions) are derived
+ *     from the very start times the fixer is sanctioned to move, so
+ *     their deltas are likewise reported (sanctioned_deltas), not
+ *     rejected. Every other defect type must not appear or grow: those
+ *     cover content the fixer never touches (text, cue count, scripts,
+ *     format), so any delta means a component bug and the whole repair
+ *     is rejected.
  *
  * A failed gate rejects the repair entirely (the original blocks are
  * returned unchanged) - partial application would hide the bug that the
@@ -35,8 +39,26 @@ use SrtValidator\SubtitleLoader;
  */
 final class VerificationGate
 {
-    /** Defect types the fixer is allowed to change by design. */
-    private const SANCTIONED_TYPES = ['timestamp_mismatch', 'reading_speed'];
+    /**
+     * Defect types the fixer is allowed to change by design:
+     * timestamp_mismatch/reading_speed (timing is the fixer's domain)
+     * and the aligner's classifications - merged/split/extra/missing
+     * captions are derived from cue start times within the validator's
+     * 0.5s pairing tolerance, so a sanctioned in-pull can legitimately
+     * reclassify a pairing (proven on dump #6: harvest-only, no
+     * wrapper, grows merged_captions by 2). All four are warning-tier
+     * and never fail a verdict on their own. Their deltas are REPORTED
+     * (sanctioned_deltas), never silently ignored; every other defect
+     * type is guarded and may not appear or grow.
+     */
+    public const SANCTIONED_TYPES = [
+        'timestamp_mismatch',
+        'reading_speed',
+        'merged_captions',
+        'split_captions',
+        'extra_caption',
+        'missing_caption',
+    ];
 
     /** Float comparison slack, in seconds. */
     private const EPSILON = 0.002;
@@ -61,7 +83,8 @@ final class VerificationGate
      *     reading_speed_before: int|null,
      *     reading_speed_after: int|null,
      *     timestamp_mismatch_before: int|null,
-     *     timestamp_mismatch_after: int|null
+     *     timestamp_mismatch_after: int|null,
+     *     sanctioned_deltas: array<string, array{before: int, after: int}>
      * }
      */
     public function verify(
@@ -80,6 +103,7 @@ final class VerificationGate
         $readingAfter = null;
         $tsBefore = null;
         $tsAfter = null;
+        $sanctionedDeltas = [];
 
         if ($sourceFile !== null && $translationFile !== null && $structureOk) {
             $comparison = $this->compareWithValidator($sourceFile, $translationFile, $repairedBlocks, $language);
@@ -97,6 +121,7 @@ final class VerificationGate
                 $readingAfter = $comparison['reading_speed_after'];
                 $tsBefore = $comparison['timestamp_mismatch_before'];
                 $tsAfter = $comparison['timestamp_mismatch_after'];
+                $sanctionedDeltas = $comparison['sanctioned_deltas'];
                 foreach ($comparison['reasons'] as $reason) {
                     $reasons[] = $reason;
                 }
@@ -115,6 +140,7 @@ final class VerificationGate
             'reading_speed_after' => $readingAfter,
             'timestamp_mismatch_before' => $tsBefore,
             'timestamp_mismatch_after' => $tsAfter,
+            'sanctioned_deltas' => $sanctionedDeltas,
         ];
     }
 
@@ -146,7 +172,10 @@ final class VerificationGate
             $in = $input[$i];
             $rep = $repaired[$i];
 
-            if (array_map('strval', $in['lines'] ?? []) !== array_map('strval', $rep['lines'] ?? [])) {
+            // Text identity up to re-wrapping: the atom fingerprint
+            // sanctions moving line breaks (the LineWrapper's charter)
+            // but rejects any character change or word merge/split.
+            if (LineWrapper::atomFingerprint($in['lines'] ?? []) !== LineWrapper::atomFingerprint($rep['lines'] ?? [])) {
                 $add(sprintf('cue #%d: text changed', $n));
             }
 
@@ -191,7 +220,7 @@ final class VerificationGate
     }
 
     /**
-     * @return array{guarded: array<string, int>, regressions: array<string, int>, reasons: list<string>, reading_speed_before: int, reading_speed_after: int, timestamp_mismatch_before: int, timestamp_mismatch_after: int, skipped: bool, skip_reason: string|null}
+     * @return array{guarded: array<string, int>, regressions: array<string, int>, reasons: list<string>, reading_speed_before: int, reading_speed_after: int, timestamp_mismatch_before: int, timestamp_mismatch_after: int, sanctioned_deltas: array<string, array{before: int, after: int}>, skipped: bool, skip_reason: string|null}
      */
     private function compareWithValidator(string $sourceFile, string $translationFile, array $repairedBlocks, ?string $language): array
     {
@@ -235,6 +264,7 @@ final class VerificationGate
                         'reading_speed_after' => 0,
                         'timestamp_mismatch_before' => 0,
                         'timestamp_mismatch_after' => 0,
+                        'sanctioned_deltas' => [],
                         'skipped' => true,
                         'skip_reason' => 'the validator could not parse the source file, so the full comparison is unavailable (structural checks still ran)',
                     ];
@@ -258,6 +288,17 @@ final class VerificationGate
             }
         }
 
+        // Sanctioned deltas are reported, never silent: a consumer must
+        // be able to see that the repair reclassified pairings.
+        $sanctionedDeltas = [];
+        foreach (self::SANCTIONED_TYPES as $type) {
+            $before = $beforeCounts[$type] ?? 0;
+            $after = $afterCounts[$type] ?? 0;
+            if ($before !== $after) {
+                $sanctionedDeltas[$type] = ['before' => $before, 'after' => $after];
+            }
+        }
+
         $readingAfter = $afterCounts['reading_speed'] ?? 0;
         if ($readingAfter > ($beforeCounts['reading_speed'] ?? 0)) {
             $reasons[] = sprintf(
@@ -278,6 +319,7 @@ final class VerificationGate
             'reading_speed_after' => $readingAfter,
             'timestamp_mismatch_before' => $beforeCounts['timestamp_mismatch'] ?? 0,
             'timestamp_mismatch_after' => $afterCounts['timestamp_mismatch'] ?? 0,
+            'sanctioned_deltas' => $sanctionedDeltas,
             'skipped' => false,
             'skip_reason' => null,
         ];
